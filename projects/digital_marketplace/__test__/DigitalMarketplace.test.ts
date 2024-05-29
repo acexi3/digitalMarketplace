@@ -11,10 +11,14 @@ let appClient: DigitalMarketplaceClient;
 describe('DigitalMarketplace', () => {
   beforeEach(fixture.beforeEach);
 
+  let seller: string;
+  let testAssetId: bigint;
+
   beforeAll(async () => {
     await fixture.beforeEach();
-    const { testAccount } = fixture.context;
     const { algorand } = fixture;
+    const { testAccount } = fixture.context;
+    seller = testAccount.addr;
 
     appClient = new DigitalMarketplaceClient(
       {
@@ -25,25 +29,104 @@ describe('DigitalMarketplace', () => {
       algorand.client.algod
     );
 
-    await appClient.create.createApplication({});
+    const assetCreate = await algorand.send.assetCreate({
+      sender: seller,
+      total: 10n,
+    });
+
+    testAssetId = BigInt(assetCreate.confirmation.assetIndex!);
+
+    await appClient.create.createApplication({ assetId: testAssetId, unitaryPrice: 0n });
   });
 
-  test('sum', async () => {
-    const a = 13;
-    const b = 37;
-    const sum = await appClient.doMath({ a, b, operation: 'sum' });
-    expect(sum.return?.valueOf()).toBe(BigInt(a + b));
+  test('optInToAsset', async () => {
+    const { algorand } = fixture;
+    const { appAddress } = await appClient.appClient.getAppReference();
+
+    const mbrTxn = await algorand.transactions.payment({
+      sender: seller,
+      receiver: appAddress,
+      amount: algokit.algos(0.1 + 0.1),
+      extraFee: algokit.algos(0.001),
+    });
+
+    const result = await appClient.optInToAsset({ mbrTxn });
+
+    expect(result.confirmation).toBeDefined();
+
+    const { balance }= await algorand .account.getAssetInformation(appAddress, testAssetId);
+    expect(balance).toBe(0n);
   });
 
-  test('difference', async () => {
-    const a = 13;
-    const b = 37;
-    const diff = await appClient.doMath({ a, b, operation: 'difference' });
-    expect(diff.return?.valueOf()).toBe(BigInt(a >= b ? a - b : b - a));
+  test('deposit', async () => {
+    const { algorand } = fixture;
+    const { appAddress } = await appClient.appClient.getAppReference();
+
+    const result = await algorand.send.assetTransfer({
+      sender: seller,
+      assetId: testAssetId,
+      receiver: appAddress,
+      amount: 3n,
+    });
+
+    expect(result.confirmation).toBeDefined();
+
+    const { balance } = await algorand.account.getAssetInformation(appAddress, testAssetId);
+    expect(balance).toBe(3n);
   });
 
-  test('hello', async () => {
-    const diff = await appClient.hello({ name: 'world!' });
-    expect(diff.return?.valueOf()).toBe('Hello, world!');
+  test('setPrice', async () => {
+    await appClient.setPrice({ unitaryPrice: algokit.algos(3.3).microAlgos });
+
+    const globalState = await appClient.getGlobalState();
+    const unitaryPrice = globalState.unitaryPrice!.asBigInt();
+    expect(unitaryPrice).toBe(BigInt(algokit.algos(3.3).microAlgos));
+  });
+
+  test('buy', async () => {
+    const { testAccount: buyer } = fixture.context;
+    const { algorand } = fixture;
+    const { appAddress } = await appClient.appClient.getAppReference();
+
+    await algorand.send.assetOptIn({
+      sender: buyer.addr,
+      assetId: testAssetId,
+    });
+
+    const buyerTxn = await algorand.transactions.payment({
+      sender: buyer.addr,
+      receiver: appAddress,
+      amount: algokit.algos(6.6),
+      extraFee: algokit.algos(0.001),
+    });
+
+    const result = await appClient.buy(
+      {
+      buyerTxn,
+      quantity: 2n,
+      }, {
+      sender: buyer,
+      }
+  );
+
+    expect(result.confirmation).toBeDefined();
+
+    const { balance } = await algorand.account.getAssetInformation(buyer.addr, testAssetId);
+    expect(balance).toBe(2n);
+  });
+
+  test('deleteApplication', async () => {
+    const { algorand } = fixture;
+    const { amount: beforeCallAmount } = await algorand.account.getInformation(seller);
+
+    const result = await appClient.delete.deleteApplication({}, { sendParams: { fee: algokit.algos(0.003).microAlgos } });
+
+    expect(result.confirmation).toBeDefined();
+
+    const { amount: afterCallAmount } = await algorand.account.getInformation(seller);
+    expect(afterCallAmount - beforeCallAmount).toEqual(algokit.algos(6.6 + 0.2 - 0.003));
+
+    const { balance } = await algorand.account.getAssetInformation(seller, testAssetId);
+    expect(balance).toBe(8n);
   });
 });
